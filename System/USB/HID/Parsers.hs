@@ -69,30 +69,30 @@ parseLongItem :: Parser LongItem
 parseLongItem = do 
   prefix <- peekWord8' 
   if isLong prefix 
-  then return (Long ())
-  else fail "Not a Long Item"
+   then return (Long ())
+   else fail "Not a Long Item"
 
 
 parseMain :: Parser HIDMainTag
 parseMain = do
   prefix <- peekWord8'
   if not.isMain $ prefix
-  then fail "Not main type"
-  else choice [parseMainInput,parseCollection,parseEndCollection] <?> "Could not parse a main tag"
+   then fail "Not main type"
+   else choice [parseMainInput,parseCollection,parseEndCollection] <?> "Could not parse a main tag"
 
 parseGlobal :: Parser HIDGlobalTag 
 parseGlobal = do
   prefix <- peekWord8'
   if isGlobal prefix
-  then choice [parseUsagePage, parseGlobalRest]
-  else fail "Not Global"
+   then choice [parseUsagePage, parseGlobalRest]
+   else fail "Not Global"
 
 parseLocal :: Parser HIDLocalTag
 parseLocal = do 
   prefix <- peekWord8'
   if isLocal prefix
-  then choice [parseUsage,parseDesignatorI,parseDelim,parseLocalRest]
-  else fail "Not Local Tag"
+   then choice [parseUsage,parseDesignatorI,parseDelim,parseLocalRest]
+   else fail "Not Local Tag"
 
 parseDesignatorI :: Parser HIDLocalTag
 parseDesignatorI = do 
@@ -217,8 +217,8 @@ parseEndCollection :: Parser HIDMainTag
 parseEndCollection = do
   prefix <- anyWord8
   if isEndCollection prefix
-  then return EndCollection
-  else fail "Not End Collection"
+   then return EndCollection
+   else fail "Not End Collection"
   
 parseCollectionData :: Word8 -> Parser HIDCollectionData
 parseCollectionData w = do
