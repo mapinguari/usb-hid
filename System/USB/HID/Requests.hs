@@ -1,13 +1,29 @@
+{-# LANGUAGE DeriveGeneric , AutoDeriveTypeable  #-}
 -- consider writing parsers for physical descriptors
 -- write documentation for all.
 module System.USB.HID.Requests (-- * Request Types 
-                                HIDDescriptorClass, HIDControlRequest, HIDProtocol, DescriptorIndex, HIDInterfaceNumber, Duration,ReportID, Report,ReportType, 
+                                HIDDescriptorClass
+                               ,HIDControlRequest
+                               ,HIDProtocol
+                               ,DescriptorIndex
+                               ,HIDInterfaceNumber
+                               ,Duration
+                               ,ReportID
+                               ,Report
+                               ,ReportType 
                                 -- * HID Requests
                                 -- | These are all specified in the HID Specification Section 7
-                                getHIDReportDesc, getPhysicalDescriptor, getReport, setReport, getIdle, setIdle, getProtocol, setProtocol)where
-
+                               ,getHIDReportDesc
+                               ,getPhysicalDescriptor
+                               ,getReport
+                               ,setReport
+                               ,getIdle
+                               ,setIdle
+                               ,getProtocol
+                               ,setProtocol
+                               ) where
+import GHC.Generics
 import Data.Word
-import Data.Bits.Bitwise hiding (map)
 import System.USB
 import Data.Attoparsec.ByteString
 import System.USB.HID.Descriptor
@@ -19,7 +35,7 @@ import Data.Tuple (swap)
 data HIDDescriptorClass = HIDR
                         | HIDReportR 
                         | PhysicalDescriptorR
-                          deriving (Eq,Show)
+                          deriving (Eq,Show,Generic)
 
 data HIDControlRequest = GetReport 
                        | GetIdle 
@@ -27,10 +43,10 @@ data HIDControlRequest = GetReport
                        | SetReport 
                        | SetIdle 
                        | SetProtocol
-                         deriving (Eq,Show)
+                         deriving (Eq,Show,Generic)
 
 data HIDProtocol = Boot | Report 
-                   deriving (Eq, Show,Enum)
+                   deriving (Eq, Show,Enum,Generic)
 
 instance Enum HIDControlRequest where 
  toEnum x = fromJust (lookup x (zip [1,2,3,9,10,11] [GetReport, GetIdle, GetProtocol, SetReport, SetIdle, SetProtocol]))
@@ -47,7 +63,7 @@ type ReportID = Word8
 type Report = ByteString
 
 data ReportType = RInput | ROutput | RFeature
-                  deriving (Eq,Show)
+                  deriving (Eq,Show,Generic)
 
 instance Enum ReportType where 
     toEnum x = fromJust (lookup x as)
@@ -65,7 +81,7 @@ instance Enum HIDDescriptorClass where
 
 getHIDDesc :: DeviceHandle -> Parser a -> HIDControlRequest -> HIDDescriptorClass -> DescriptorIndex -> HIDInterfaceNumber -> Size -> Timeout -> IO a 
 getHIDDesc h parser cr dc di intN s t = do 
-  (bs,s) <- readControl h Class ToInterface (toEnum . fromEnum $ cr) ((toEnum . fromEnum $ dc )*256 + (toEnum . fromEnum $ di)) intN s t
+  (bs,s) <- readControl h (ControlSetup Class ToInterface (convertEnum $ cr) ((convertEnum $ dc )*256 + (convertEnum $ di)) intN) s t
   case parseOnly parser bs of 
     Left x -> fail "Could not Parse descriptor"
     Right x -> return x
@@ -82,42 +98,41 @@ getPhysicalDescriptor h intN di = getHIDDesc h parsePhysDescSet GetReport Physic
 -- | The GetReport request allows the host to receive a report via the Control pipe.
 
 getReport :: DeviceHandle -> ReportType -> ReportID -> HIDInterfaceNumber -> Size -> Timeout -> IO (ByteString,Status)
-getReport h rt ri intN s t = hidGet h (toEnum . fromEnum $ SetReport) ((toEnum . fromEnum $ rt )*256 + (toEnum . fromEnum $ ri)) intN s t
+getReport h rt ri intN s t = hidGet h (convertEnum $ SetReport) ((convertEnum $ rt )*256 + (convertEnum $ ri)) intN s t
 
 -- | The SetReport request allows the host to send a report to the device, possibly setting the state of input, output, or feature controls.
 
 setReport :: DeviceHandle -> ReportType -> ReportID -> HIDInterfaceNumber -> Report -> Timeout -> IO (Size,Status)
-setReport h rt ri intN r t = hidSet h (toEnum . fromEnum $ SetReport) ((toEnum . fromEnum $ rt )*256 + (toEnum . fromEnum $ ri)) intN r t
+setReport h rt ri intN r t = hidSet h (convertEnum $ SetReport) ((convertEnum $ rt )*256 + (convertEnum $ ri)) intN r t
 
 -- | The GetIdle request reads the current idle rate for a particular Input report
 
 getIdle :: DeviceHandle -> HIDInterfaceNumber -> ReportID -> Timeout -> IO (HIDProtocol,Status)
 getIdle h intN rid t = do 
-  (p,s) <- hidGet h (toEnum . fromEnum $ GetIdle) (toEnum . fromEnum $ rid) intN 1 t
+  (p,s) <- hidGet h (convertEnum $ GetIdle) (convertEnum $ rid) intN 1 t
   let i = fromEnum (B.head p)
   return (toEnum i ,s)
 
 -- | The SetIdle request silences a particular report on the Interrupt In pipe until a new event occurs or the specified amount of time passes.
 
 setIdle :: DeviceHandle -> HIDInterfaceNumber -> Duration -> ReportID -> Timeout -> IO (Size,Status)
-setIdle h intN d rid = hidSet h (toEnum . fromEnum $ SetIdle) ((toEnum . fromEnum $ d )*256 + (toEnum . fromEnum $ rid)) intN empty
+setIdle h intN d rid = hidSet h (convertEnum $ SetIdle) ((convertEnum $ d )*256 + (convertEnum $ rid)) intN empty
 
 -- | The GetProtocol request reads which protocol is currently active (either the boot protocol or the report protocol.)
 
 getProtocol :: DeviceHandle -> HIDInterfaceNumber -> Timeout -> IO (HIDProtocol,Status)
 getProtocol h intN t = do 
-  (p,s) <- hidGet h (toEnum . fromEnum $ GetProtocol) 0 intN 1 t
+  (p,s) <- hidGet h (convertEnum $ GetProtocol) 0 intN 1 t
   let i = fromEnum (B.head p)
   return (toEnum i ,s)
 
 -- | The SetProtocol switches between the boot protocol and the report protocol (or vice versa).
 
 setProtocol :: DeviceHandle -> HIDProtocol -> HIDInterfaceNumber -> Timeout -> IO (Size,Status)
-setProtocol h p intN = hidSet h (toEnum . fromEnum $ SetProtocol) (toEnum . fromEnum $ p) intN empty
+setProtocol h p intN = hidSet h (convertEnum $ SetProtocol) (convertEnum $ p) intN empty
 
 hidSet :: DeviceHandle -> Word8 -> Word16 -> Word16 -> ByteString ->Timeout -> IO (Size,Status)
-hidSet h = writeControl h Class ToInterface 
+hidSet h r v = writeControl h . ControlSetup Class ToInterface r v
 
 hidGet :: DeviceHandle -> Word8 -> Word16 -> Word16 -> Size -> Timeout -> IO (ByteString,Status)
-hidGet h = readControl h Class ToInterface
-
+hidGet h r v = readControl h . ControlSetup Class ToInterface r v

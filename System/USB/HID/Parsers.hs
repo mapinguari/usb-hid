@@ -4,16 +4,18 @@ module System.USB.HID.Parsers (-- * Top Level Parsers
                               ,parsePhysDescSet
                               ,parseHIDReportDesc
                                -- ** Second Level Parsers
-                              ,parseInt) where
+                              ,parseInt
+                              ,convertEnum) where
 
-import Data.Bits ((.&.),rotate,rotateR)
-import Data.Bits.Bitwise (fromListBE,fromListLE,toListLE)
+import Data.Bits ((.&.),rotate,rotateR,testBit)
 import Data.Attoparsec.ByteString (Parser,anyWord8,peekWord8',peekWord8,choice,(<?>),many')
 import qualified Data.Attoparsec.ByteString as AB (take)
 import System.USB.HID.Descriptor
 import Data.Word (Word8)
 import Data.ByteString (ByteString, unpack,pack)
-
+import qualified Data.ByteString as B (zip)
+import Control.Applicative ((<$>))
+import Control.Monad (when, unless)
 
 -- | Parse a 'HIDDescriptor'
 parseHIDDesc :: Parser HIDDescriptor
@@ -26,24 +28,31 @@ parseHIDDesc  = do
   hidDescL <- anyWord8
   hidDescT' <- peekWord8
   hidDescL' <- peekWord8
-  return (HIDDescriptor hidDesc1 hidcd hidCC hidND hidDesc2 (fromEnum hidDescL) hidDescT' hidDescL')
+  return (HIDDescriptor hidDesc1 
+                        hidcd 
+                        hidCC
+                        hidND
+                        hidDesc2
+                        (fromEnum hidDescL) 
+                        hidDescT' 
+                        hidDescL')
 
 -- | Parse a 'HIDReportDesc'
 parseHIDReportDesc :: Parser HIDReportDesc
-parseHIDReportDesc = many' parseReportItem >>= return . HIDReport
+parseHIDReportDesc = HIDReport <$> many' parseReportItem 
 
 parsePhysicalDesc :: Parser HIDPhysicalDescriptor
 parsePhysicalDesc = do 
-  desig <- anyWord8 >>= return . toEnum . fromEnum
+  desig <- convertEnum <$> anyWord8 
   bq <- anyWord8 
-  return (PD desig (toEnum . fromEnum . sig3 $ bq) (toEnum . fromEnum . lsig5 $ bq))
+  return (PD desig (convertEnum . sig3 $ bq) (convertEnum . lsig5 $ bq))
 
 -- | Parse a 'HIDPhysDescSet' 
 parsePhysDescSet :: Parser HIDPhysDescSet
 parsePhysDescSet = do 
   pref <- anyWord8 
   sets <- many' parsePhysicalDesc
-  return (PDS (toEnum . fromEnum . sig3 $ pref) (fromEnum . lsig5 $ pref) sets)
+  return (PDS (convertEnum . sig3 $ pref) (fromEnum . lsig5 $ pref) sets)
 
 parseVersion :: Parser Version
 parseVersion = do 
@@ -54,178 +63,134 @@ parseVersion = do
 
 binDec :: Word8 -> Int 
 binDec w = (t * 10) + s
-    where beS = fromListLE [True,True,True,True,False,False,False,False]
+    where beS = 0xF0
           s = fromEnum $ w .&. beS
           t = fromEnum $ (rotate w 4) .&. beS
 
 parseReportItem :: Parser HIDReportItem
-parseReportItem = choice [parseShortItem >>= return . HIDReportS,
-                          parseLongItem >>= return . HIDReportL]
+parseReportItem = choice [HIDReportS <$> parseShortItem
+                         ,HIDReportL <$> parseLongItem 
+                         ]
 
 parseShortItem :: Parser ShortItem
-parseShortItem = choice [parseMain >>= return . Main,parseGlobal >>= return . Global,parseLocal >>= return . Local]
+parseShortItem = choice [Main <$> parseMain
+                        ,Global <$> parseGlobal 
+                        ,Local <$> parseLocal 
+                        ]
+
+parseTop1 :: (Word8 -> Bool) -> String -> Parser a -> Parser a
+parseTop1 test err parser = do 
+  prefix <- peekWord8' 
+  unless (test prefix) $ 
+         fail err
+  parser
 
 parseLongItem :: Parser LongItem
-parseLongItem = do 
-  prefix <- peekWord8' 
-  if isLong prefix 
-   then return (Long ())
-   else fail "Not a Long Item"
-
+parseLongItem = parseTop1 isLong "Not a Long Item" (return $ Long ())
 
 parseMain :: Parser HIDMainTag
-parseMain = do
-  prefix <- peekWord8'
-  if not.isMain $ prefix
-   then fail "Not main type"
-   else choice [parseMainInput,parseCollection,parseEndCollection] <?> "Could not parse a main tag"
+parseMain = parseTop1 isMain "Not main Type" $ choice [parseMainInput,parseCollection,parseEndCollection]
 
 parseGlobal :: Parser HIDGlobalTag 
-parseGlobal = do
-  prefix <- peekWord8'
-  if isGlobal prefix
-   then choice [parseUsagePage, parseGlobalRest]
-   else fail "Not Global"
+parseGlobal = parseTop1 isGlobal "Not Global" $ choice [parseUsagePage, parseGlobalRest]
 
 parseLocal :: Parser HIDLocalTag
-parseLocal = do 
-  prefix <- peekWord8'
-  if isLocal prefix
-   then choice [parseUsage,parseDesignatorI,parseDelim,parseLocalRest]
-   else fail "Not Local Tag"
+parseLocal = parseTop1 isLocal "Not Local Tag" $ choice [parseUsage,parseDesignatorI,parseDelim,parseLocalRest]
+
+parseTop2 :: (Word8 -> Bool) -> String -> (Word8 -> Parser a) 
+          -> Parser a
+parseTop2 test err parseCons = do 
+  prefix <- anyWord8
+  unless (test . preTag $ prefix) $ 
+         fail err
+  parseCons (preDataL $ prefix)
+  
 
 parseDesignatorI :: Parser HIDLocalTag
-parseDesignatorI = do 
-  prefix <- anyWord8 
-  tdata <- if preTag prefix == 3
-           then parseDesIData (fromEnum (preDataL prefix))
-           else fail "Not DesignatorI"
-  return . DesignatorIndex $ tdata
+parseDesignatorI = parseTop2 (== 3) "Not DesignatorI" ((DesignatorIndex <$>) . parseDesIData . fromEnum)
 
 parseDelim :: Parser HIDLocalTag
-parseDelim = do 
-  prefix <- anyWord8 
-  tdata <- if preTag prefix == 9
-           then parseDelimData (fromEnum (preDataL prefix))
-           else fail "Not Delimiter"
-  return . Delimiter $ tdata
+parseDelim = parseTop2 (== 9) "Not Delimiter" ((Delimiter <$>) . parseDelimData . fromEnum)
   
 parseDelimData :: Int -> Parser HIDDelimeter
-parseDelimData n = parseInt n >>= return . toEnum
+parseDelimData n = toEnum <$> parseInt n 
 
 parseDesIData :: Int -> Parser HIDDesignator
-parseDesIData n = parseInt n >>= return . toEnum
+parseDesIData n = toEnum <$> parseInt n 
 
 parseLocalRest :: Parser HIDLocalTag
 parseLocalRest = do 
   prefix <- anyWord8
-  tdata <- if let t = preTag prefix in 
-              t < 10 && not (t `elem` [0,3,9])
-           then parseInt (fromEnum . preDataL $ prefix)
-           else fail "Not a data Int Local"
-  return (intToLocalTag (fromEnum . preTag $ prefix) tdata)
-  
+  let int = parseInt (fromEnum . preDataL $ prefix)
+  case preTag prefix of
+    1 -> UsageMinimum <$> int
+    2 ->  UsageMaximum <$> int
+    4 ->  DesignatorMinimum <$> int
+    5 ->  DesignatorMaximum <$> int
+    7 ->  StringIndex <$> int
+    8 ->  StringMinimum <$> int
+    9 -> StringMaximum <$> int
+    _ -> fail "Not a data Int Local"
 
 parseUsage :: Parser HIDLocalTag
-parseUsage = do 
-  prefix <- anyWord8
-  tdata <- if preTag prefix == 0
-           then parseUsageData (fromEnum . preDataL $ prefix)
-           else fail "Not Usage Tag"
-  return . Usage $ tdata
+parseUsage = parseTop2 (== 0) "Not Usage Tag" ((Usage <$>) . parseUsageData . fromEnum)
 
 parseUsageData :: Int -> Parser HIDUsage
-parseUsageData n = parseInt n >>= return . U
+parseUsageData n = U <$> parseInt n 
    
-
 parseUsagePage :: Parser HIDGlobalTag
-parseUsagePage = do
-  prefix <- anyWord8 
-  tdata <- if isUsagePage prefix 
-           then parseUsagePageData (fromEnum (preDataL prefix))
-           else fail "Not UsagePage"
-  return $ UsagePage tdata
+parseUsagePage = parseTop2 isUsagePage "Not UsagePage" ((UsagePage <$>) . parseUsagePageData . fromEnum)
 
 parseUsagePageData :: Int -> Parser HIDUsagePage
-parseUsagePageData n = parseInt n >>= return . UP
+parseUsagePageData n = UP <$> parseInt n 
 
 -- | @parseInt n@ parses an @Int@ of length encoded in @n@ 'Word8''s
 parseInt :: Int -> Parser Int
-parseInt n = do
-  bs <- AB.take n
-  return (byteStringToInt bs)
+parseInt n = byteStringToInt <$> AB.take n
 
 parseGlobalRest :: Parser HIDGlobalTag
 parseGlobalRest = do
   prefix <- anyWord8
-  tdata <- if preTag prefix `elem` [1..11]
-           then parseInt (fromEnum . preDataL $ prefix)
-           else fail "Not a data Int global"
-  return (intToGlobalTag (fromEnum . preTag $ prefix) tdata)
-  
-intToGlobalTag :: Int -> Int -> HIDGlobalTag
-intToGlobalTag i 
- | i == 1 = LogicalMinimum 
- | i == 2 = LogicalMaximum
- | i == 3 = PhysicalMinimum 
- | i == 4 = PhysicalMaximum 
- | i == 5 = UnitExponent 
- | i == 6 = Unit 
- | i == 7 = ReportSize 
- | i == 8 = ReportID 
- | i == 9 = ReportCount 
- | i == 10 = Push 
- | i == 11 = Pop  
-
-intToLocalTag :: Int -> Int -> HIDLocalTag
-intToLocalTag i 
-    | i == 1 = UsageMinimum
-    | i == 2 = UsageMaximum
-    | i == 4 = DesignatorMinimum 
-    | i == 5 = DesignatorMaximum 
-    | i == 7 = StringIndex 
-    | i == 8 = StringMinimum
-    | i == 9 = StringMaximum 
+  let int = parseInt (fromEnum . preDataL $ prefix)
+  case preTag prefix of
+      1  -> LogicalMinimum  <$> int
+      2  -> LogicalMaximum  <$> int
+      3  -> PhysicalMinimum <$> int
+      4  -> PhysicalMaximum <$> int
+      5  -> UnitExponent    <$> int
+      6  -> Unit            <$> int
+      7  -> ReportSize      <$> int
+      8  -> ReportID        <$> int
+      9  -> ReportCount     <$> int
+      10 -> Push            <$> int
+      11 -> Pop             <$> int
+      _  -> fail "Not a data Int global"
 
 byteStringToInt :: ByteString -> Int
-byteStringToInt = fromEnum . sum . zipWith f [0..] . unpack
-    where f a b = 2^(8*a) * b 
+byteStringToInt = foldl f 0 . B.zip (pack [0..])
+    where f a (b,c) = 2^(8* (fromEnum b)) * (fromEnum c) + a  
 
 parseMainInput :: Parser HIDMainTag 
 parseMainInput = do
   prefix <- anyWord8
-  constr <- chooseMainTag (preTag prefix)
-  tdata <- parseMainData (preDataL prefix)
-  return (constr tdata)
-
-chooseMainTag :: Word8 -> Parser (HIDMainData -> HIDMainTag)
-chooseMainTag n 
-    | n == 8 = return Input
-    | n == 9 = return Output
-    | n == 11 = return Feature
-    | otherwise = fail "Incorrect tag"
+  let mainData = parseMainData (preDataL prefix)
+  case preTag prefix of 
+    8 -> Input <$> mainData
+    9 -> Output <$> mainData
+    11 -> Feature <$> mainData
+    _ -> fail "Incorrect Tag"
 
 parseCollection :: Parser HIDMainTag
-parseCollection = do 
-  prefix <- anyWord8
-  tdata <- if isCollection prefix
-           then parseCollectionData (preDataL prefix)
-           else fail "Not Collection"
-  return $ Collection tdata
+parseCollection = parseTop2 isCollection "Not Collection" ((Collection <$>) . parseCollectionData)
 
 parseEndCollection :: Parser HIDMainTag
-parseEndCollection = do
-  prefix <- anyWord8
-  if isEndCollection prefix
-   then return EndCollection
-   else fail "Not End Collection"
+parseEndCollection = parseTop2 isEndCollection "Not End Collection" (const (return EndCollection))
   
 parseCollectionData :: Word8 -> Parser HIDCollectionData
 parseCollectionData w = do
-  tdata <- anyWord8
-  let collData = toEnum . fromEnum $ tdata
+  tdata <- convertEnum <$> anyWord8
   AB.take (fromEnum (w - 1))
-  return collData
+  return tdata
 
 parseMainData :: Word8 -> Parser HIDMainData
 parseMainData n = do 
@@ -233,7 +198,7 @@ parseMainData n = do
                    then n
                    else 2)
   as <- AB.take a
-  let bs = concatMap toListLE (unpack as) ++ (repeat False)
+  let bs = concatMap takingBits (unpack as) ++ (repeat False)
   return (constructHIDMainD (map fromEnum (takeBits bs)))
 
 takeBits :: [Bool] -> [Bool]
@@ -262,21 +227,26 @@ isEndCollection w = preTag w == 12
 
 preType :: Word8 -> Word8                       
 preType p = rotateR (p .&. typeM) 2
-    where typeM = fromListBE ([False,False,False,False] ++ [True,True] ++ [False,False]) 
+    where typeM = 0x0C
 
 preTag  ::  Word8 -> Word8                       
 preTag p = rotateR (p .&. tagM) 4
-    where tagM = fromListLE (take 4 (repeat False) ++ take 4 (repeat True)) 
+    where tagM = 0xF0
 
 preDataL :: Word8 -> Word8           
 preDataL p = p .&. dataLengthM
-    where dataLengthM = fromListLE ([True,True] ++ (take 6 (repeat False)))
+    where dataLengthM = 0x03
 
 sig3 :: Word8 -> Word8 
 sig3 w = rotate (w .&. m) 3
-    where m = fromListBE (take 3 (repeat True) ++ take 5 (repeat False))
+    where m = 0xE0
 
 lsig5 :: Word8 -> Word8 
 lsig5 w = w .&. m 
-    where m = fromListBE (take 3 (repeat False) ++ take 5 (repeat True))
+    where m = 0x1F
 
+convertEnum :: (Enum a, Enum b) => a -> b
+convertEnum = toEnum . fromEnum
+
+takingBits :: Word8 -> [Bool]
+takingBits x = map (testBit x) [0..7]
